@@ -2,9 +2,14 @@ from flask import Flask, request, jsonify
 from atlassian import Jira
 import json
 import os
+from datetime import datetime
 from config import JIRA_URL, JIRA_USERNAME, JIRA_API_TOKEN, validate_config
 
 app = Flask(__name__)
+
+# Build info - Updated for clean deployment
+BUILD_VERSION = "v1.2.0"
+BUILD_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 # Initialize Jira client
 def get_jira_client():
@@ -19,9 +24,10 @@ def get_jira_client():
 @app.route("/")
 def home():
     return f"""
-    <h1>Jira MCP Server</h1>
+    <h1>Jira MCP Server {BUILD_VERSION}</h1>
     <p><strong>Status:</strong> ✅ Connected to {JIRA_URL}</p>
     <p><strong>User:</strong> {JIRA_USERNAME}</p>
+    <p><strong>Build:</strong> {BUILD_TIME}</p>
     
     <h2>Available Endpoints:</h2>
     <ul>
