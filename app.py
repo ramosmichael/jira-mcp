@@ -8,7 +8,7 @@ from config import JIRA_URL, JIRA_USERNAME, JIRA_API_TOKEN, validate_config
 app = Flask(__name__)
 
 # Build info - Updated for clean deployment
-BUILD_VERSION = "v1.2.1"
+BUILD_VERSION = "v1.3.0-mcp-fix"
 BUILD_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 # Initialize Jira client
@@ -272,6 +272,111 @@ def mcp_endpoint():
                             "type": "text",
                             "text": f"Found {len(result)} Jira projects:\n\n" + 
                                    "\n".join([f"• {p['name']} ({p['key']})" for p in result])
+                        }
+                    ]
+                }
+            }
+            
+        elif tool_name == "initialize":
+            # MCP initialization handshake - CRITICAL for Jace.ai
+            print(f"[MCP DEBUG] Handling initialize request")
+            protocol_version = arguments.get("protocolVersion", "2024-11-05")
+            client_info = arguments.get("clientInfo", {})
+            
+            response_data = {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {
+                        "tools": {
+                            "listChanged": False
+                        }
+                    },
+                    "serverInfo": {
+                        "name": "jira-mcp-server",
+                        "version": BUILD_VERSION
+                    }
+                }
+            }
+            print(f"[MCP DEBUG] Initialize response: {json.dumps(response_data, indent=2)}")
+            
+        elif tool_name in ["tools/list", "listTools"] or request.args.get("method") == "tools/list":
+            # Tools discovery for MCP - return available tools
+            print(f"[MCP DEBUG] Handling tools/list request")
+            response_data = {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {
+                    "tools": [
+                        {
+                            "name": "jira_list_projects",
+                            "description": "List all available Jira projects from Talkable's Atlassian instance",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {},
+                                "required": []
+                            }
+                        },
+                        {
+                            "name": "jira_search_issues", 
+                            "description": "Search Jira issues using JQL (Jira Query Language)",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "jql": {
+                                        "type": "string",
+                                        "description": "JQL query string (e.g., 'project = TEST AND status = Open')"
+                                    },
+                                    "max_results": {
+                                        "type": "integer",
+                                        "description": "Maximum number of results to return (default: 50)",
+                                        "default": 50
+                                    }
+                                },
+                                "required": ["jql"]
+                            }
+                        },
+                        {
+                            "name": "jira_get_issue",
+                            "description": "Get detailed information about a specific Jira issue",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "issue_key": {
+                                        "type": "string",
+                                        "description": "Jira issue key (e.g., 'PROJ-123')"
+                                    }
+                                },
+                                "required": ["issue_key"]
+                            }
+                        },
+                        {
+                            "name": "jira_create_issue",
+                            "description": "Create a new Jira issue in Talkable's projects",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "project_key": {
+                                        "type": "string",
+                                        "description": "Project key where the issue will be created"
+                                    },
+                                    "summary": {
+                                        "type": "string",
+                                        "description": "Brief summary of the issue"
+                                    },
+                                    "description": {
+                                        "type": "string",
+                                        "description": "Detailed description of the issue"
+                                    },
+                                    "issue_type": {
+                                        "type": "string",
+                                        "description": "Type of issue (e.g., 'Task', 'Bug', 'Story')",
+                                        "default": "Task"
+                                    }
+                                },
+                                "required": ["project_key", "summary"]
+                            }
                         }
                     ]
                 }
