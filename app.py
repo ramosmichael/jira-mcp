@@ -4,22 +4,44 @@ import json
 import os
 from datetime import datetime
 from config import JIRA_URL, JIRA_USERNAME, JIRA_API_TOKEN, validate_config
+import urllib.parse
+import requests
 
 app = Flask(__name__)
 
 # Build info - Updated for clean deployment
-BUILD_VERSION = "v1.3.0-mcp-fix"
+BUILD_VERSION = "v1.4.0-oauth-ready"
 BUILD_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-# Initialize Jira client
-def get_jira_client():
-    validate_config()
-    return Jira(
-        url=JIRA_URL,
-        username=JIRA_USERNAME,
-        password=JIRA_API_TOKEN,
-        cloud=True
-    )
+# Simple in-memory token storage (use database in production)
+oauth_tokens = {}
+
+# OAuth configuration
+OAUTH_CLIENT_ID = os.getenv("OAUTH_CLIENT_ID", "JqlDDc1zqyr62EPkAOwI3hPdQVWefTZ")
+OAUTH_CLIENT_SECRET = os.getenv("OAUTH_CLIENT_SECRET")  # Set this in Heroku config vars
+
+def get_jira_client(user_id=None):
+    """Get Jira client with OAuth token if available, fallback to API token"""
+    if user_id and user_id in oauth_tokens:
+        # Use OAuth token
+        token_data = oauth_tokens[user_id]
+        return Jira(
+            url=JIRA_URL,
+            oauth2={
+                "access_token": token_data["access_token"],
+                "token_type": "Bearer"
+            },
+            cloud=True
+        )
+    else:
+        # Fallback to API token
+        validate_config()
+        return Jira(
+            url=JIRA_URL,
+            username=JIRA_USERNAME,
+            password=JIRA_API_TOKEN,
+            cloud=True
+        )
 
 @app.route("/")
 def home():
@@ -28,6 +50,7 @@ def home():
     <p><strong>Status:</strong> ✅ Connected to {JIRA_URL}</p>
     <p><strong>User:</strong> {JIRA_USERNAME}</p>
     <p><strong>Build:</strong> {BUILD_TIME}</p>
+    <p><strong>OAuth Ready:</strong> ✅ Callback endpoint available</p>
     
     <h2>Available Endpoints:</h2>
     <ul>
@@ -36,6 +59,7 @@ def home():
         <li><strong>POST</strong> <code>/create-issue</code> - Create new issue</li>
         <li><strong>GET</strong> <code>/issue/&lt;key&gt;</code> - Get specific issue</li>
         <li><strong>POST</strong> <code>/api/mcp</code> - MCP endpoint</li>
+        <li><strong>GET</strong> <code>/api/mcp/callback</code> - OAuth callback</li>
     </ul>
     
     <h2>MCP Tools Available:</h2>
@@ -49,6 +73,107 @@ def home():
     <h2>Test Connection:</h2>
     <a href="/projects">View Projects</a>
     """
+
+# OAuth callback endpoint for Jace.ai
+@app.route("/api/mcp/callback", methods=["GET", "POST"])
+def oauth_callback():
+    """Handle OAuth callback from Atlassian"""
+    print(f"[OAUTH DEBUG] Callback received: {request.method}")
+    print(f"[OAUTH DEBUG] Args: {dict(request.args)}")
+    print(f"[OAUTH DEBUG] Headers: {dict(request.headers)}")
+    
+    if request.method == "GET":
+        # Handle OAuth authorization code
+        code = request.args.get("code")
+        state = request.args.get("state")
+        error = request.args.get("error")
+        
+        if error:
+            print(f"[OAUTH DEBUG] OAuth error: {error}")
+            return jsonify({
+                "error": error,
+                "error_description": request.args.get("error_description", "OAuth authorization failed")
+            }), 400
+        
+        if not code:
+            print("[OAUTH DEBUG] No authorization code received")
+            return jsonify({"error": "No authorization code received"}), 400
+        
+        try:
+            # Exchange code for access token
+            token_data = exchange_code_for_token(code)
+            
+            # Store token (use state as user identifier)
+            user_id = state or "default_user"
+            oauth_tokens[user_id] = token_data
+            
+            print(f"[OAUTH DEBUG] Token stored for user: {user_id}")
+            
+            # Return success response that Jace.ai can handle
+            return jsonify({
+                "status": "success",
+                "message": "OAuth authorization successful",
+                "user_id": user_id,
+                "token_type": token_data.get("token_type", "Bearer")
+            })
+            
+        except Exception as e:
+            print(f"[OAUTH DEBUG] Token exchange failed: {str(e)}")
+            return jsonify({
+                "error": "token_exchange_failed",
+                "message": str(e)
+            }), 500
+    
+    elif request.method == "POST":
+        # Handle direct token posting (if Jace.ai sends tokens directly)
+        data = request.json or {}
+        print(f"[OAUTH DEBUG] POST data: {json.dumps(data, indent=2)}")
+        
+        if data.get("access_token"):
+            user_id = data.get("user_id", "default_user")
+            oauth_tokens[user_id] = {
+                "access_token": data["access_token"],
+                "token_type": data.get("token_type", "Bearer"),
+                "refresh_token": data.get("refresh_token"),
+                "expires_in": data.get("expires_in")
+            }
+            
+            return jsonify({
+                "status": "success",
+                "message": "Token stored successfully",
+                "user_id": user_id
+            })
+        
+        return jsonify({"error": "No access token provided"}), 400
+
+def exchange_code_for_token(code):
+    """Exchange authorization code for access token"""
+    token_url = "https://auth.atlassian.com/oauth/token"
+    
+    # Get the current domain for redirect_uri
+    redirect_uri = request.url_root.rstrip('/') + "/api/mcp/callback"
+    
+    token_data = {
+        "grant_type": "authorization_code",
+        "client_id": OAUTH_CLIENT_ID,
+        "client_secret": OAUTH_CLIENT_SECRET,
+        "code": code,
+        "redirect_uri": redirect_uri
+    }
+    
+    print(f"[OAUTH DEBUG] Token request data: {token_data}")
+    
+    response = requests.post(
+        token_url,
+        data=token_data,
+        headers={"Content-Type": "application/x-www-form-urlencoded"}
+    )
+    
+    if response.status_code == 200:
+        return response.json()
+    else:
+        print(f"[OAUTH DEBUG] Token exchange failed: {response.status_code} - {response.text}")
+        raise Exception(f"Token exchange failed: {response.status_code} - {response.text}")
 
 # MCP Protocol Implementation with enhanced debugging
 @app.route("/api/mcp", methods=["GET", "POST", "OPTIONS"])
@@ -258,7 +383,9 @@ def mcp_endpoint():
         
         print(f"[MCP DEBUG] Tool: {tool_name}, Args: {arguments}")
         
-        jira = get_jira_client()
+        # Try to get user_id from request headers or arguments
+        user_id = request.headers.get("X-User-ID") or arguments.get("user_id")
+        jira = get_jira_client(user_id)
         
         # Handle different tool name formats
         if tool_name in ["jira_list_projects", "list_jira_projects"]:
@@ -534,7 +661,8 @@ def mcp_endpoint():
 @app.route("/projects")
 def get_projects():
     try:
-        jira = get_jira_client()
+        user_id = request.headers.get("X-User-ID")
+        jira = get_jira_client(user_id)
         projects = jira.projects()
         return jsonify({
             "success": True,
@@ -675,7 +803,8 @@ def call_tool():
     arguments = data.get("arguments", {})
     
     try:
-        jira = get_jira_client()
+        user_id = request.headers.get("X-User-ID")
+        jira = get_jira_client(user_id)
         
         if tool_name == "jira_list_projects":
             result = jira.projects()
@@ -740,7 +869,8 @@ def search_issues():
     max_results = int(request.args.get("max_results", 50))
     
     try:
-        jira = get_jira_client()
+        user_id = request.headers.get("X-User-ID")
+        jira = get_jira_client(user_id)
         results = jira.jql(jql, limit=max_results)
         return jsonify({
             "success": True,
@@ -757,7 +887,8 @@ def search_issues():
 @app.route("/issue/<issue_key>")
 def get_issue(issue_key):
     try:
-        jira = get_jira_client()
+        user_id = request.headers.get("X-User-ID")
+        jira = get_jira_client(user_id)
         issue = jira.issue(issue_key)
         return jsonify({
             "success": True,
@@ -772,7 +903,8 @@ def get_issue(issue_key):
 @app.route("/create-issue", methods=["POST"])
 def create_issue():
     try:
-        jira = get_jira_client()
+        user_id = request.headers.get("X-User-ID")
+        jira = get_jira_client(user_id)
         data = request.json
         
         # Example issue data structure
@@ -803,7 +935,8 @@ def create_issue():
 @app.route("/health")
 def health_check():
     try:
-        jira = get_jira_client()
+        user_id = request.headers.get("X-User-ID")
+        jira = get_jira_client(user_id)
         # Simple test to verify connection
         jira.projects()
         return jsonify({
